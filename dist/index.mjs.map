@@ -1,1 +1,1 @@
-{"version":3,"sources":["../src/index.ts"],"sourcesContent":["/**\r\n * Demo logic for core library.\r\n */\r\nexport const getCoreHello = (): string => {\r\n  return \"Hello from Core Engine!\";\r\n};\r\n"],"mappings":";AAGO,IAAM,eAAe,MAAc;AACxC,SAAO;AACT;","names":[]}
+{"version":3,"sources":["../src/index.ts"],"sourcesContent":["/**\n * Demo logic for core library.\n */\nexport const getCoreHello = (): string => {\n  return 'Hello from Core Engine!';\n};\n"],"mappings":";AAGO,IAAM,eAAe,MAAc;AACxC,SAAO;AACT;","names":[]}
