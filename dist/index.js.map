@@ -1,0 +1,1 @@
+{"version":3,"sources":["../src/index.ts"],"sourcesContent":["/**\r\n * Demo logic for core library.\r\n */\r\nexport const getCoreHello = (): string => {\r\n  return \"Hello from Core Engine!\";\r\n};\r\n"],"mappings":";;;;;;;;;;;;;;;;;;;;AAAA;AAAA;AAAA;AAAA;AAAA;AAGO,IAAM,eAAe,MAAc;AACxC,SAAO;AACT;","names":[]}
