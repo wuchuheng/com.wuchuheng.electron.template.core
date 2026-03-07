@@ -17,9 +17,9 @@
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
+    "test": "vitest run",
     "lint": "prettier --check \"src/**/*.ts\" && eslint src --ext .ts && tsc --noEmit",
-    "format": "prettier --write \"src/**/*.ts\"",
-    "release": "npm run build && git add . && git commit -m \"release: update core library\" && git push"
+    "format": "prettier --write \"src/**/*.ts\""
   },
   "dependencies": {
     "chalk": "^4.1.2",
