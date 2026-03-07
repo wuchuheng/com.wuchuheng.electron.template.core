@@ -1,0 +1,200 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import ts from 'typescript';
+
+export interface SyncIpcOptions {
+  projectRoot: string;
+  ipcRoot: string;
+  manifestPath: string;
+  typesPath: string;
+  tsconfigPath: string;
+}
+
+const toPosix = (filePath: string) => filePath.split(path.sep).join('/');
+
+const readTsConfig = (configPath: string) => {
+  const configFile = ts.readConfigFile(configPath, ts.sys.readFile);
+  if (configFile.error) {
+    throw new Error(
+      ts.formatDiagnosticsWithColorAndContext([configFile.error], {
+        getCanonicalFileName: f => f,
+        getCurrentDirectory: ts.sys.getCurrentDirectory,
+        getNewLine: () => ts.sys.newLine,
+      })
+    );
+  }
+
+  const parsed = ts.parseJsonConfigFileContent(configFile.config, ts.sys, path.dirname(configPath));
+  if (parsed.errors.length) {
+    throw new Error(
+      ts.formatDiagnosticsWithColorAndContext(parsed.errors, {
+        getCanonicalFileName: f => f,
+        getCurrentDirectory: ts.sys.getCurrentDirectory,
+        getNewLine: () => ts.sys.newLine,
+      })
+    );
+  }
+
+  return parsed;
+};
+
+const collectIpcFiles = (dir: string): string[] => {
+  if (!fs.existsSync(dir)) return [];
+  const entries = fs.readdirSync(dir, { withFileTypes: true });
+  return entries.flatMap(entry => {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      return collectIpcFiles(fullPath);
+    }
+    if (entry.isFile() && entry.name.endsWith('.ipc.ts')) {
+      return [fullPath];
+    }
+    return [];
+  });
+};
+
+export const syncIpc = (options: SyncIpcOptions) => {
+  const { ipcRoot, manifestPath, typesPath, tsconfigPath } = options;
+
+  const parsedConfig = readTsConfig(tsconfigPath);
+  const ipcFiles = collectIpcFiles(ipcRoot);
+
+  if (!ipcFiles.length) {
+    console.warn('No IPC files found. Nothing to sync.');
+    return;
+  }
+
+  const program = ts.createProgram({
+    rootNames: Array.from(new Set([...parsedConfig.fileNames, ...ipcFiles])),
+    options: parsedConfig.options,
+  });
+  const checker = program.getTypeChecker();
+
+  const ensureSourceFile = (filePath: string) => {
+    const source = program.getSourceFile(filePath);
+    if (!source) {
+      throw new Error(`Unable to find source file in program: ${filePath}`);
+    }
+    return source;
+  };
+
+  const getDefaultExportType = (sourceFile: ts.SourceFile) => {
+    const moduleSymbol = checker.getSymbolAtLocation(sourceFile);
+    if (!moduleSymbol) return undefined;
+
+    const exports = checker.getExportsOfModule(moduleSymbol);
+    const defaultSymbol =
+      exports.find(sym => sym.escapedName === (ts as any).InternalSymbolName.Default) ||
+      exports.find(sym => sym.escapedName === 'default');
+
+    if (!defaultSymbol) return undefined;
+
+    return checker.getTypeOfSymbolAtLocation(defaultSymbol, sourceFile);
+  };
+
+  const isEventType = (type: ts.Type | undefined, sourceFile: ts.SourceFile) => {
+    if (!type) return false;
+    const flag = checker.getPropertyOfType(type, '_isEvent');
+    if (!flag) return false;
+    const location = (flag.valueDeclaration || flag.declarations?.[0] || sourceFile) as ts.Node;
+    const flagType = checker.getTypeOfSymbolAtLocation(flag, location);
+    const asString = checker.typeToString(flagType);
+    return asString === 'true';
+  };
+
+  const manifest: any = {};
+  const moduleMap: any = {};
+
+  ipcFiles.forEach(filePath => {
+    const relativeToIpcRoot = path.relative(ipcRoot, filePath);
+    const parts = relativeToIpcRoot.split(path.sep);
+    const moduleName = parts[0];
+    const methodName = parts
+      .slice(1)
+      .join('/')
+      .replace(/\.ipc\.ts$/, '');
+
+    if (!moduleName || !methodName) {
+      throw new Error(`Invalid IPC file path "${relativeToIpcRoot}". Expected <module>/<method>.ipc.ts`);
+    }
+
+    const channel = `${moduleName}:${methodName}`;
+    const importPath = toPosix(path.join('..', 'main', 'ipc', relativeToIpcRoot.replace(/\.ts$/, '')));
+
+    const sourceFile = ensureSourceFile(filePath);
+    const type = getDefaultExportType(sourceFile);
+    const event = isEventType(type, sourceFile);
+
+    manifest[moduleName] = manifest[moduleName] ?? {};
+    manifest[moduleName][methodName] = {
+      channel,
+      type: event ? 'event' : 'invoke',
+    };
+
+    moduleMap[moduleName] = moduleMap[moduleName] ?? [];
+    moduleMap[moduleName].push({ methodName, importPath });
+  });
+
+  const sortKeys = (obj: any) =>
+    Object.keys(obj)
+      .sort()
+      .reduce((acc: any, key) => {
+        acc[key] = obj[key];
+        return acc;
+      }, {});
+
+  const sortedManifest = Object.keys(manifest)
+    .sort()
+    .reduce((acc: any, moduleName) => {
+      acc[moduleName] = sortKeys(manifest[moduleName]);
+      return acc;
+    }, {});
+
+  fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
+  fs.writeFileSync(manifestPath, JSON.stringify(sortedManifest, null, 2) + '\n');
+
+  const typeLines: string[] = [];
+  typeLines.push('// AUTO-GENERATED BY @wuchuheng/electron-template-core - DO NOT EDIT MANUALLY');
+  typeLines.push('/* eslint-disable @typescript-eslint/no-explicit-any */');
+  typeLines.push('');
+  typeLines.push('type Awaitable<T> = T extends Promise<infer R> ? Promise<R> : Promise<T>;');
+  typeLines.push('type ToRendererMethod<T> = T extends { _isEvent: true }');
+  typeLines.push('  ? (listener: (payload: Parameters<T>[0]) => void) => () => void');
+  typeLines.push('  : (...args: Parameters<T>) => Awaitable<ReturnType<T>>;');
+  typeLines.push('');
+  typeLines.push('type IpcModules = {');
+  Object.keys(moduleMap)
+    .sort()
+    .forEach(moduleName => {
+      typeLines.push(`  ${moduleName}: {`);
+      moduleMap[moduleName]
+        .sort((a: any, b: any) => a.methodName.localeCompare(b.methodName))
+        .forEach(({ methodName, importPath }: any) => {
+          typeLines.push(`    ${methodName}: typeof import('${importPath}').default;`);
+        });
+      typeLines.push('  };');
+    });
+  typeLines.push('};');
+  typeLines.push('');
+  typeLines.push('type RendererApi<T> = {');
+  typeLines.push('  [M in keyof T]: {');
+  typeLines.push('    [K in keyof T[M]]: ToRendererMethod<T[M][K]>;');
+  typeLines.push('  };');
+  typeLines.push('};');
+  typeLines.push('');
+  typeLines.push('export type GeneratedElectronApi = RendererApi<IpcModules>;');
+  typeLines.push('');
+  typeLines.push('declare global {');
+  typeLines.push('  interface Window {');
+  typeLines.push('    electron: GeneratedElectronApi;');
+  typeLines.push('  }');
+  typeLines.push('}');
+  typeLines.push('');
+  typeLines.push('export {};');
+  typeLines.push('');
+
+  fs.mkdirSync(path.dirname(typesPath), { recursive: true });
+  fs.writeFileSync(typesPath, typeLines.join('\n'));
+
+  console.log(`Synced IPC manifest (${ipcFiles.length} modules) and types.`);
+};
